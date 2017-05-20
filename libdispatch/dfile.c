@@ -24,6 +24,25 @@ Research/Unidata. See COPYRIGHT file for more info.
 #include "netcdf_mem.h"
 #include "ncwinpath.h"
 
+/**
+Sort info for open/read/close of
+file when searching for magic numbers
+*/
+struct MagicFile {
+    const char* path;
+    int use_parallel;
+    int inmemory;
+    void* parameters;
+    FILE* fp;
+#ifdef USE_PARALLEL
+    MPI_File fh;
+#endif
+};
+
+static int openmagic(struct MagicFile* file);
+static int readmagic(struct MagicFile* file, long pos, char* magic);
+static int closemagic(struct MagicFile* file);
+
 extern int NC_initialized;
 extern int NC_finalized;
 
@@ -66,27 +85,24 @@ interfaces, the rest of this chapter presents a detailed description
 of the interfaces for these operations.
 */
 
-
 /*!
   Interpret the magic number found in the header of a netCDF file.
-
   This function interprets the magic number/string contained in the header of a netCDF file and sets the appropriate NC_FORMATX flags.
 
   @param[in] magic Pointer to a character array with the magic number block.
   @param[out] model Pointer to an integer to hold the corresponding netCDF type.
   @param[out] version Pointer to an integer to hold the corresponding netCDF version.
-  @param[in] use_parallel 1 if using parallel, 0 if not.
-  @return Returns an error code or 0 on success.
 
 \internal
 \ingroup datasets
 
 */
-static int
-NC_interpret_magic_number(char* magic, int* model, int* version, int use_parallel)
+static void
+NC_interpret_magic_number(char* magic, int* model, int* version)
 {
-    int status = NC_NOERR;
     /* Look at the magic number */
+    *model = 0;
+    *version = 0;
 #ifdef USE_NETCDF4
     /* Use the complete magic number string for HDF5 */
     if(memcmp(magic,HDF5_SIGNATURE,sizeof(HDF5_SIGNATURE))==0) {
@@ -111,11 +127,11 @@ NC_interpret_magic_number(char* magic, int* model, int* version, int use_paralle
             *version = 5; /* cdf5 (including pnetcdf) file */
 	    *model = NC_FORMATX_NC3;
 	 } else
-	    {status = NC_ENOTNC; goto done;}
+	    goto done;	
      } else
-        {status = NC_ENOTNC; goto done;}
+	goto done;
 done:
-     return status;
+     return;
 }
 
 /*!
@@ -127,109 +143,63 @@ int
 NC_check_file_type(const char *path, int flags, void *parameters,
 		   int* model, int* version)
 {
-   char magic[MAGIC_NUMBER_LEN];
-   int status = NC_NOERR;
-   int diskless = ((flags & NC_DISKLESS) == NC_DISKLESS);
-   int use_parallel = ((flags & NC_MPIIO) == NC_MPIIO);
-   int inmemory = (diskless && ((flags & NC_INMEMORY) == NC_INMEMORY));
+    char magic[MAGIC_NUMBER_LEN];
+    int status = NC_NOERR;
+    int diskless = ((flags & NC_DISKLESS) == NC_DISKLESS);
+    int use_parallel = ((flags & NC_MPIIO) == NC_MPIIO);
+    int inmemory = (diskless && ((flags & NC_INMEMORY) == NC_INMEMORY));
+    struct MagicFile file;
 
    *model = 0;
+   *version = 0;
 
-    if(inmemory)  {
-	NC_MEM_INFO* meminfo = (NC_MEM_INFO*)parameters;
-	if(meminfo == NULL || meminfo->size < MAGIC_NUMBER_LEN)
+    memset((void*)&file,0,sizeof(file));   
+    file.path = path; /* do not free */
+    file.parameters = parameters;
+    if(inmemory) {
+	if(parameters == NULL)
 	    {status = NC_EDISKLESS; goto done;}
-	memcpy(magic,meminfo->memory,MAGIC_NUMBER_LEN);
-        /* Look at the magic number */
-        status = NC_interpret_magic_number(magic,model,version,use_parallel);
-	goto done;
+	file.inmemory = inmemory;
+	goto next;
     }
     /* presumably a real file */
-    /* Get the magic bytes  from the beginning of the file. Don't use posix
-     * for parallel, use the MPI functions instead. */
 #ifdef USE_PARALLEL
+    /* for parallel, use the MPI functions instead (why?) */
     if (use_parallel) {
-	    MPI_File fh;
-	    MPI_Status mstatus;
-	    int retval;
-	    MPI_Comm comm = MPI_COMM_WORLD;
-	    MPI_Info info = MPI_INFO_NULL;
-
-	    if(parameters != NULL) {
-	        comm = ((NC_MPI_INFO*)parameters)->comm;
-		info = ((NC_MPI_INFO*)parameters)->info;
-	    }
-	    if((retval = MPI_File_open(comm,(char*)path,MPI_MODE_RDONLY,info,
-				       &fh)) != MPI_SUCCESS)
-		{status = NC_EPARINIT; goto done;}
-	    if((retval = MPI_File_read(fh, magic, MAGIC_NUMBER_LEN, MPI_CHAR,
-				 &mstatus)) != MPI_SUCCESS)
-		{status = NC_EPARINIT; goto done;}
-	    if((retval = MPI_File_close(&fh)) != MPI_SUCCESS)
-		{status = NC_EPARINIT; goto done;}
-	} else
+	file.useparallel = use_parallel;
+	goto next;
+    }
 #endif /* USE_PARALLEL */
-	{
-	    FILE *fp;
-	    size_t i;
-#ifdef HAVE_FILE_LENGTH_I64
-          __int64 file_len = 0;
-#endif
 
-	    if(path == NULL || strlen(path)==0)
-		{status = NC_EINVAL; goto done;}
+next:
+    if((status = openmagic(&file)) != NC_NOERR) goto done;
+    if((status = readmagic(&file,0L,magic)) != NC_NOERR) {
+	status = NC_ENOTNC;
+	*model = 0;
+	*version = 0;
+	goto done;
+    }
+    /* Look at the magic number */
+    NC_interpret_magic_number(magic,model,version);
+    if(*model != 0) goto done; /* found something */
 
-	    if (!(fp = fopen(path, "r")))
-		{status = errno; goto done;}
-
-#ifdef HAVE_SYS_STAT_H
-	    /* The file must be at least MAGIC_NUMBER_LEN in size,
-	       or otherwise the following fread will exhibit unexpected
-  	       behavior. */
-
-        /* Windows and fstat have some issues, this will work around that. */
-#ifdef HAVE_FILE_LENGTH_I64
-          if((file_len = _filelengthi64(fileno(fp))) < 0) {
-            fclose(fp);
-            status = errno;
-            goto done;
-          }
-
-
-          if(file_len < MAGIC_NUMBER_LEN) {
-            fclose(fp);
-            status = NC_ENOTNC;
-            goto done;
-          }
-else
-	  { int fno = fileno(fp);
-	    if(!(fstat(fno,&st) == 0)) {
-	        fclose(fp);
-	        status = errno;
+    /* Remaining case is to search forward at starting at 512
+       and doubling to see if we have HDF5 magic number */
+    {
+	long pos = 512L;
+        for(;;) {
+            if((status = readmagic(&file,pos,magic)) != NC_NOERR) {
+	        status = NC_ENOTNC;
 	        goto done;
 	    }
-	    if(st.st_size < MAGIC_NUMBER_LEN) {
-              fclose(fp);
-              status = NC_ENOTNC;
-              goto done;
-	    }
-	  }
-#endif //HAVE_FILE_LENGTH_I64
-
-#endif //HAVE_SYS_STAT_H
-
-	    i = fread(magic, MAGIC_NUMBER_LEN, 1, fp);
-	    fclose(fp);
-	    if(i == 0)
-		{status = NC_ENOTNC; goto done;}
-	    if(i != 1)
-		{status = errno; goto done;}
-	}
-    /* Look at the magic number */
-    status = NC_interpret_magic_number(magic,model,version,use_parallel);
-
+	    if(*model == NC_FORMATX_NC4 && *version == 5) break;
+	    /* double and try again */
+	    pos = 2*pos;
+        }
+    }    
 done:
-   return status;
+    closemagic(&file);
+    return status;
 }
 
 /**  \ingroup datasets
@@ -2000,3 +1970,141 @@ nc__pseudofd(void)
     }
     return pseudofd++;
 }
+
+/**
+\internal
+\ingroup datasets
+Provide open, read and close for use when searching for magic numbers
+*/
+static int
+openmagic(struct MagicFile* file)
+{
+    int status = NC_NOERR;
+    if(file->inmemory) goto done; /* nothing to do */
+#ifdef USE_PARALLEL
+    if (file->use_parallel) {
+	MPI_Status mstatus;
+	int retval;
+	MPI_Comm comm = MPI_COMM_WORLD;
+	MPI_Info info = MPI_INFO_NULL;
+        if(file->parameters != NULL) {
+	    comm = ((NC_MPI_INFO*)file->parameters)->comm;
+	    info = ((NC_MPI_INFO*)file->parameters)->info;
+	}
+	if((retval = MPI_File_open(comm,(char*)file->path,MPI_MODE_RDONLY,info,
+				       &file->fh)) != MPI_SUCCESS)
+	    {status = NC_EPARINIT; goto done;}
+	goto done;
+    }
+#endif /* USE_PARALLEL */
+    {
+	size_t i;
+#ifdef HAVE_FILE_LENGTH_I64
+        __int64 file_len = 0;
+#endif
+        if(file->path == NULL || strlen(file->path)==0)
+	    {status = NC_EINVAL; goto done;}
+        if (!(file->fp = fopen(file->path, "r")))
+	    {status = errno; goto done;}
+#ifdef MAGICIGNORE
+This code is apparently never defined or used anymore
+#ifdef HAVE_SYS_STAT_H
+        /* The file must be at least MAGIC_NUMBER_LEN in size,
+	   or otherwise the following fread will exhibit unexpected
+  	   behavior. */
+	/* Windows and fstat have some issues, this will work around that. */
+#ifdef HAVE_FILE_LENGTH_I64
+        if((file_len = _filelengthi64(fileno(file->fp))) < 0) {
+            fclose(file->fp);
+            status = errno;
+            goto done;
+        }
+	if(file_len < MAGIC_NUMBER_LEN) {
+	    fclose(file->fp);
+	    status = NC_ENOTNC;
+            goto done;
+	} else {
+	    int fno = fileno(file->fp);
+	    if(!(fstat(fno,&st) == 0)) {
+	        fclose(fp);
+	        status = errno;
+	        goto done;
+	    }
+	    if(st.st_size < MAGIC_NUMBER_LEN) {
+              fclose(fp);
+              status = NC_ENOTNC;
+              goto done;
+	    }
+	  }
+#endif 
+#endif //HAVE_SYS_STAT_H
+#endif /*MAGICIGNORE*/
+	goto done;
+    }
+
+done:
+    return status;
+}
+
+static int
+readmagic(struct MagicFile* file, long pos, char* magic)
+{
+    int status = NC_NOERR;
+    if(file->inmemory) {
+	NC_MEM_INFO* meminfo = (NC_MEM_INFO*)file->parameters;
+	if((pos + MAGIC_NUMBER_LEN) > meminfo->size)
+	    {status = NC_EDISKLESS; goto done;}
+	memcpy(magic,meminfo->memory+pos,MAGIC_NUMBER_LEN);        
+	goto done;
+    }
+#ifdef USE_PARALLEL
+    if (file->use_parallel) {
+	MPI_Status mstatus;
+	int retval;
+	MPI_offset offset;
+	offset = offset;
+	if((retval = MPI_File_seek(file->fh, offset, MPI_SEEK_SET)) != MPI_SUCCESS)
+	    {status = NC_EPARINIT; goto done;}	
+	if((retval = MPI_File_read(file->fh, magic, MAGIC_NUMBER_LEN, MPI_CHAR,
+				 &mstatus)) != MPI_SUCCESS)
+	    {status = NC_EPARINIT; goto done;}
+	goto done;
+    }
+#endif /* USE_PARALLEL */
+    {
+	int i = fseek(file->fp,pos,SEEK_SET);
+	if(i < 0)
+	    {status = errno; goto done;}
+	i = fread(magic, MAGIC_NUMBER_LEN, 1, file->fp);
+	if(i == 0)
+	    {status = NC_ENOTNC; goto done;}
+	if(i != 1)
+	    {status = errno; goto done;}
+	goto done;
+    }
+done:
+    return status;
+}
+
+static int
+closemagic(struct MagicFile* file)
+{
+    int status = NC_NOERR;
+    if(file->inmemory) goto done; /* noop*/
+#ifdef USE_PARALLEL
+    if (file->use_parallel) {
+	MPI_Status mstatus;
+	int retval;
+	if((retval = MPI_File_close(&file->fh)) != MPI_SUCCESS)
+		{status = NC_EPARINIT; goto done;}
+	goto done;
+    }
+#endif
+    {
+	if(file->fp) fclose(file->fp);
+	goto done;
+    }
+done:
+    return status;
+}
+
