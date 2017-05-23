@@ -30,6 +30,7 @@ file when searching for magic numbers
 */
 struct MagicFile {
     const char* path;
+    long long filelen;
     int use_parallel;
     int inmemory;
     void* parameters;
@@ -42,6 +43,7 @@ struct MagicFile {
 static int openmagic(struct MagicFile* file);
 static int readmagic(struct MagicFile* file, long pos, char* magic);
 static int closemagic(struct MagicFile* file);
+static void printmagic(const char* tag, char* magic,struct MagicFile*);
 
 extern int NC_initialized;
 extern int NC_finalized;
@@ -172,7 +174,11 @@ NC_check_file_type(const char *path, int flags, void *parameters,
 #endif /* USE_PARALLEL */
 
 next:
-    if((status = openmagic(&file)) != NC_NOERR) goto done;
+    status = openmagic(&file);
+    if(status != NC_NOERR) {goto done;}
+    /* Verify we have a large enough file */
+    if(file.filelen < MAGIC_NUMBER_LEN)
+	{status = NC_ENOTNC; goto done;}
     if((status = readmagic(&file,0L,magic)) != NC_NOERR) {
 	status = NC_ENOTNC;
 	*model = 0;
@@ -188,11 +194,12 @@ next:
     {
 	long pos = 512L;
         for(;;) {
-            if((status = readmagic(&file,pos,magic)) != NC_NOERR) {
-	        status = NC_ENOTNC;
-	        goto done;
-	    }
-	    if(*model == NC_FORMATX_NC4 && *version == 5) break;
+	    if((pos+MAGIC_NUMBER_LEN) > file.filelen)
+		{status = NC_ENOTNC; goto done;}
+            if((status = readmagic(&file,pos,magic)) != NC_NOERR)
+	        {status = NC_ENOTNC; goto done; }
+            NC_interpret_magic_number(magic,model,version);
+            if(*model == NC_FORMATX_NC4 && *version == 5) break;
 	    /* double and try again */
 	    pos = 2*pos;
         }
@@ -1636,7 +1643,6 @@ NC_create(const char *path0, int cmode, size_t initialsz,
 #ifdef WINPATH
    /* Need to do path conversion */
    path = NCpathcvt(path0);
-fprintf(stderr,"XXX: path0=%s path=%s\n",path0,path); fflush(stderr);
 #else
    path = nulldup(path0);
 #endif
@@ -1803,7 +1809,6 @@ NC_open(const char *path0, int cmode,
 #ifdef WINPATH
    /* Need to do path conversion */
    path = NCpathcvt(path0);
-fprintf(stderr,"XXX: path0=%s path=%s\n",path0,path); fflush(stderr);
 #else
    path = nulldup(path0);
 #endif
@@ -1980,11 +1985,18 @@ static int
 openmagic(struct MagicFile* file)
 {
     int status = NC_NOERR;
-    if(file->inmemory) goto done; /* nothing to do */
+    if(file->inmemory) {
+	/* Get its length */
+	NC_MEM_INFO* meminfo = (NC_MEM_INFO*)file->parameters;
+	file->filelen = (long long)meminfo->size;
+fprintf(stderr,"XXX: openmagic: memory=0x%llx size=%ld\n",meminfo->memory,meminfo->size);
+	goto done;
+    }
 #ifdef USE_PARALLEL
     if (file->use_parallel) {
 	MPI_Status mstatus;
 	int retval;
+	MPI_Offset size;
 	MPI_Comm comm = MPI_COMM_WORLD;
 	MPI_Info info = MPI_INFO_NULL;
         if(file->parameters != NULL) {
@@ -1994,51 +2006,40 @@ openmagic(struct MagicFile* file)
 	if((retval = MPI_File_open(comm,(char*)file->path,MPI_MODE_RDONLY,info,
 				       &file->fh)) != MPI_SUCCESS)
 	    {status = NC_EPARINIT; goto done;}
+	/* Get its length */
+	if((retval=MPI_File_get_size(file->fh, &size)) != MPI_SUCCESS)
+	    {status = NC_EPARINIT; goto done;}
+	file->filelen = (long long)size;
 	goto done;
     }
 #endif /* USE_PARALLEL */
     {
-	size_t i;
-#ifdef HAVE_FILE_LENGTH_I64
-        __int64 file_len = 0;
-#endif
         if(file->path == NULL || strlen(file->path)==0)
 	    {status = NC_EINVAL; goto done;}
-        if (!(file->fp = fopen(file->path, "r")))
+#ifdef _MSC_VER
+        file->fp = fopen(file->path, "rb");
+#else
+        file->fp = fopen(file->path, "r");
+#endif
+	if(file->fp == NULL)
 	    {status = errno; goto done;}
-#ifdef MAGICIGNORE
-This code is apparently never defined or used anymore
-#ifdef HAVE_SYS_STAT_H
-        /* The file must be at least MAGIC_NUMBER_LEN in size,
-	   or otherwise the following fread will exhibit unexpected
-  	   behavior. */
-	/* Windows and fstat have some issues, this will work around that. */
-#ifdef HAVE_FILE_LENGTH_I64
-        if((file_len = _filelengthi64(fileno(file->fp))) < 0) {
-            fclose(file->fp);
-            status = errno;
-            goto done;
-        }
-	if(file_len < MAGIC_NUMBER_LEN) {
-	    fclose(file->fp);
-	    status = NC_ENOTNC;
-            goto done;
-	} else {
-	    int fno = fileno(file->fp);
-	    if(!(fstat(fno,&st) == 0)) {
-	        fclose(fp);
-	        status = errno;
-	        goto done;
-	    }
-	    if(st.st_size < MAGIC_NUMBER_LEN) {
-              fclose(fp);
-              status = NC_ENOTNC;
-              goto done;
-	    }
-	  }
-#endif 
-#endif //HAVE_SYS_STAT_H
-#endif /*MAGICIGNORE*/
+	/* Get its length */
+	{
+#ifdef _MSC_VER
+	int fd = fileno(file->fp);
+	__int64 len64 = _filelengthi64(fd);
+	if(len64 < 0)
+            {status = errno; goto done;}
+	file->filelen = (long long)len64;
+#else
+	long size;
+	if((status = fseek(file->fp, 0L, SEEK_END)) < 0)
+	    {status = errno; goto done;}
+	size = ftell(file->fp);
+	file->filelen = (long long)size;
+#endif
+	rewind(file->fp);
+	}
 	goto done;
     }
 
@@ -2050,11 +2051,17 @@ static int
 readmagic(struct MagicFile* file, long pos, char* magic)
 {
     int status = NC_NOERR;
+    memset(magic,0,MAGIC_NUMBER_LEN);
     if(file->inmemory) {
+	char* mempos;
 	NC_MEM_INFO* meminfo = (NC_MEM_INFO*)file->parameters;
+fprintf(stderr,"XXX: readmagic: memory=0x%llx size=%ld\n",meminfo->memory,meminfo->size);
+fprintf(stderr,"XXX: readmagic: pos=%ld filelen=%lld\n",pos,file->filelen);
 	if((pos + MAGIC_NUMBER_LEN) > meminfo->size)
 	    {status = NC_EDISKLESS; goto done;}
-	memcpy(magic,meminfo->memory+pos,MAGIC_NUMBER_LEN);        
+	mempos = ((char*)meminfo->memory) + pos;
+	memcpy((void*)magic,mempos,MAGIC_NUMBER_LEN);
+printmagic("XXX: readmagic",magic,file);
 	goto done;
     }
 #ifdef USE_PARALLEL
@@ -2072,17 +2079,20 @@ readmagic(struct MagicFile* file, long pos, char* magic)
     }
 #endif /* USE_PARALLEL */
     {
+	size_t count;
 	int i = fseek(file->fp,pos,SEEK_SET);
 	if(i < 0)
 	    {status = errno; goto done;}
-	i = fread(magic, MAGIC_NUMBER_LEN, 1, file->fp);
-	if(i == 0)
-	    {status = NC_ENOTNC; goto done;}
-	if(i != 1)
-	    {status = errno; goto done;}
+	for(i=0;i<MAGIC_NUMBER_LEN;) {/* make sure to read proper # of bytes */
+	    count=fread(&magic[i],1,(MAGIC_NUMBER_LEN-i),file->fp);
+	    if(count == 0 || ferror(file->fp))
+		{status = errno; goto done;}
+	    i += count;
+	}
 	goto done;
     }
 done:
+    if(file && file->fp) clearerr(file->fp);
     return status;
 }
 
@@ -2108,3 +2118,23 @@ done:
     return status;
 }
 
+static void
+printmagic(const char* tag, char* magic, struct MagicFile* f)
+{
+    int i;
+    fprintf(stderr,"%s: inmem=%d ispar=%d magic=",tag,f->inmemory,f->use_parallel);
+    for(i=0;i<MAGIC_NUMBER_LEN;i++) {
+        unsigned int c = (unsigned int)magic[i];
+	c = c & 0x000000FF;
+	if(c == '\n')
+	    fprintf(stderr," 0x%0x/'\\n'",c);
+	else if(c == '\r')
+	    fprintf(stderr," 0x%0x/'\\r'",c);
+	else if(c < ' ')
+	    fprintf(stderr," 0x%0x/'?'",c);
+	else
+	    fprintf(stderr," 0x%0x/'%c'",c,c);
+    }
+    fprintf(stderr,"\n");
+    fflush(stderr);
+}
