@@ -8,6 +8,9 @@
 include $(top_srcdir)/lib_flags.am
 LDADD = ${top_builddir}/liblib/libnetcdf.la
 
+LOG_DRIVER = $(SHELL) $(top_srcdir)/test-driver-verbose
+TEST_LOG_DRIVER = $(SHELL) $(top_srcdir)/test-driver-verbose
+
 TESTS_ENVIRONMENT=CC=${CC}
 
 # This is the program we're building, and it's sources.
