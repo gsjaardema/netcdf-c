@@ -44,7 +44,7 @@ check_PROGRAMS = rewrite-scalar ctest ctest64 ncdump tst_utf8 bom tst_dimsizes n
 TESTS = tst_inttags.sh run_tests.sh tst_64bit.sh ctest ctest64 tst_output.sh	\
 tst_lengths.sh tst_calendars.sh tst_utf8 run_utf8_tests.sh      \
 tst_nccopy3.sh tst_charfill.sh tst_iter.sh tst_formatx3.sh tst_bom.sh \
-tst_dimsizes.sh
+tst_dimsizes.sh tst_hdf5_offset.sh
 
 if USE_NETCDF4
 check_PROGRAMS += tst_fileinfo
@@ -164,7 +164,7 @@ tst_formatx3.sh tst_formatx4.sh ref_tst_utf8_4.cdl                      \
 tst_inttags.sh tst_inttags4.sh                                          \
 CMakeLists.txt XGetopt.c tst_bom.sh tst_inmemory_nc3.sh                 \
 tst_dimsizes.sh tst_inmemory_nc4.sh tst_fileinfo.sh                     \
-test_corrupt_magic.nc
+test_corrupt_magic.nc tst_hdf5_offset.sh
 
 
 # CDL files and Expected results
