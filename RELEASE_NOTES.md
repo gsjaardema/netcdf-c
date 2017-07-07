@@ -9,6 +9,10 @@ This file contains a high-level description of this package's evolution. Release
 
 ### 4.5.0-rc2 - TBD
 
+* [Bug Fix] [Place Holder for information about PR 405](https://github.com/Unidata/netcdf-c/pull/405)
+* [Bug Fix] [Place Holder for information about Issue 435, PR 436](https://github.com/Unidata/netcdf-c/pull/436)
+* [Bug Fix] [Place Holder for information about PR 409](https://github.com/Unidata/netcdf-c/pull/409)
+* [Bug Fix] [Place Holder for information about PR 406](https://github.com/Unidata/netcdf-c/pull/406)
 * [Bug Fix] Addressed an issue where ncgen would not respect keyword case. See [GitHub #310](https://github.com/Unidata/netcdf-c/issues/310) for more information.
 
 ### 4.5.0-rc1 - June 5, 2017
