@@ -9,10 +9,10 @@ This file contains a high-level description of this package's evolution. Release
 
 ### 4.5.0-rc2 - TBD
 
-* [Bug Fix] [Place Holder for information about PR 405](https://github.com/Unidata/netcdf-c/pull/405)
-* [Bug Fix] [Place Holder for information about Issue 435, PR 436](https://github.com/Unidata/netcdf-c/pull/436)
-* [Bug Fix] [Place Holder for information about PR 409](https://github.com/Unidata/netcdf-c/pull/409)
-* [Bug Fix] [Place Holder for information about PR 406](https://github.com/Unidata/netcdf-c/pull/406)
+* [Bug Fix] Providing better detection of corrupted `HDF5` file headers. See [#405](https://github.com/Unidata/netcdf-c/pull/405) for more information.
+* [Bug Fix] Cleaning up circumstances where temporary files are left in a temporary directory.  See [#436](https://github.com/Unidata/netcdf-c/pull/436) for more information.
+* [Documentation] Clarified instructions for building `libhdf5` in `install.md`. See [#409](https://github.com/Unidata/netcdf-c/pull/409) for more information.
+* [Bug Fix] Temporarily suppressing MAP vars referring to struct fields. See [#406](https://github.com/Unidata/netcdf-c/pull/406) for more information.
 * [Bug Fix] Addressed an issue where ncgen would not respect keyword case. See [GitHub #310](https://github.com/Unidata/netcdf-c/issues/310) for more information.
 
 ### 4.5.0-rc1 - June 5, 2017
